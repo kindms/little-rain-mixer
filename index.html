@@ -50,11 +50,8 @@
     transition: background 0.2s;
   }
 
-  /* 音量重設按鈕：緊鄰推桿右上方 */
+  /* 音量重設按鈕：位於 % 數值右側 */
   .reset-vol-btn {
-    position: absolute;
-    top: 14px;
-    right: 8px;
     width: 18px;
     height: 18px;
     line-height: 16px;
@@ -66,7 +63,12 @@
     font-size: 10px;
     cursor: pointer;
     text-align: center;
-    z-index: 2;
+  }
+  .fader-val-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
   }
   .reset-vol-btn:hover { background: #4af; color: #111; border-color: #4af; }
   .channel:hover { background: #252525; }
@@ -426,8 +428,8 @@
     <h3 style="margin-top:4px">Export</h3>
     <div class="info-box">
       格式：<span>MP3 (128kbps)</span><br>
-      方式：<span>離線渲染</span><br>
-      ─ 匯入音頻後直接按匯出，不需先播放
+      方式：<span id="export-mode">離線渲染</span><br>
+      <span id="export-note">─ 匯入音頻後直接按匯出，不需先播放</span>
     </div>
     <button class="ctrl-btn export" id="btn-export" onclick="exportMp3()">⬇ 匯出 MP3</button>
 
@@ -462,6 +464,12 @@ let lamejsReady = false;
   document.head.appendChild(s);
 })();
 
+// ── SoundTouchJS 動態載入（變調用，ESM-only，動態 import） ──
+let PitchShifterClass = null;
+import('https://cdn.jsdelivr.net/npm/soundtouchjs@0.1.30/dist/soundtouch.js')
+  .then(mod => { PitchShifterClass = mod.PitchShifter; })
+  .catch(e => setStatus('變調引擎載入失敗: ' + e.message, 'err'));
+
 // ── AudioContext ──────────────────────────────────────────
 let ctx = null;
 const CHANNEL_COUNT = 8;
@@ -476,13 +484,41 @@ let isSeeking = false;     // 使用者是否正在拖拉進度條
 let pitchSemitones = 0;    // 移調量（半音，-12 ~ +12）
 
 function changePitch(delta) {
+  const old = pitchSemitones;
   pitchSemitones = Math.min(12, Math.max(-12, pitchSemitones + delta));
   const val = pitchSemitones > 0 ? `+${pitchSemitones}` : `${pitchSemitones}`;
   document.getElementById('pitch-val').textContent = val;
-  // 即時套用到正在播放的音軌
-  channels.forEach(ch => {
-    if (ch.source) ch.source.detune.setTargetAtTime(pitchSemitones * 100, ctx.currentTime, 0.01);
-  });
+  updateExportInfo();
+
+  if (pitchSemitones === old) return;
+
+  if (isPlaying) {
+    const wasZero = old === 0;
+    const isZero = pitchSemitones === 0;
+    if (wasZero !== isZero) {
+      // 播放引擎需要切換（一般 vs 變調），從目前位置重新開始
+      currentPosition = Math.min(ctx.currentTime - playStartTime, totalDuration);
+      startPlayback();
+    } else if (!isZero) {
+      // 仍在變調模式，即時更新音高
+      channels.forEach(ch => {
+        if (ch.shifter) ch.shifter.pitchSemitones = pitchSemitones;
+      });
+    }
+  }
+}
+
+function updateExportInfo() {
+  const modeEl = document.getElementById('export-mode');
+  const noteEl = document.getElementById('export-note');
+  if (!modeEl || !noteEl) return;
+  if (pitchSemitones === 0) {
+    modeEl.textContent = '離線渲染';
+    noteEl.textContent = '─ 匯入音頻後直接按匯出，不需先播放';
+  } else {
+    modeEl.textContent = '即時錄製';
+    noteEl.textContent = '─ 變調後需即時錄製，匯出時間等同曲長';
+  }
 }
 
 function ensureCtx() {
@@ -503,6 +539,7 @@ for (let i = 0; i < CHANNEL_COUNT; i++) {
     name: CH_NAMES[i],
     buffer: null,
     source: null,
+    shifter: null,
     gainNode: null,
     volume: 80,
     muted: false,
@@ -534,7 +571,6 @@ function buildUI() {
       </label>
 
       <div class="fader-area">
-        <button class="reset-vol-btn" id="reset-${ch.id}" title="重設音量為 80%" onclick="resetVolume(${ch.id})">0</button>
         <div class="fader-label">Volume</div>
         <div class="fader-row">
           <div class="vu-wrap"><div class="vu-bar" id="vu-${ch.id}"></div></div>
@@ -542,7 +578,10 @@ function buildUI() {
             min="0" max="150" value="${ch.volume}"
             oninput="setVol(${ch.id}, this.value)">
         </div>
-        <div class="fader-val" id="val-${ch.id}">${ch.volume}%</div>
+        <div class="fader-val-row">
+          <div class="fader-val" id="val-${ch.id}">${ch.volume}%</div>
+          <button class="reset-vol-btn" id="reset-${ch.id}" title="重設音量為 80%" onclick="resetVolume(${ch.id})">0</button>
+        </div>
       </div>
 
       <div class="btn-row">
@@ -722,19 +761,32 @@ async function togglePlay() {
   startPlayback();
 }
 
+// 停止並清除某軌目前的播放節點（一般 source 或變調 shifter）
+function stopChannelNodes(ch) {
+  if (ch.source) {
+    ch.source.onended = null;
+    try { ch.source.stop(); } catch(e){}
+    try { ch.source.disconnect(); } catch(e){}
+    ch.source = null;
+  }
+  if (ch.shifter) {
+    try { ch.shifter.off(); } catch(e){}
+    try { ch.shifter.disconnect(); } catch(e){}
+    ch.shifter = null;
+  }
+}
+
 function startPlayback() {
   const loaded = channels.filter(ch => ch.buffer);
   if (loaded.length === 0) { setStatus('請先匯入至少一個音頻檔案！', 'err'); return; }
 
   // 清理舊 source（重新播放 / seek 時用）
-  channels.forEach(ch => {
-    if (ch.source) {
-      ch.source.onended = null;
-      try { ch.source.stop(); } catch(e){}
-      try { ch.source.disconnect(); } catch(e){}
-      ch.source = null;
-    }
-  });
+  channels.forEach(ch => stopChannelNodes(ch));
+
+  const usePitchShift = pitchSemitones !== 0 && PitchShifterClass;
+  if (pitchSemitones !== 0 && !PitchShifterClass) {
+    setStatus('變調引擎尚未就緒，暫以原音高播放', 'warn');
+  }
 
   channels.forEach(ch => {
     if (!ch.buffer) return;
@@ -748,18 +800,28 @@ function startPlayback() {
     analyser.fftSize = 256;
     ch.analyser = analyser;
 
-    const src = ctx.createBufferSource();
-    src.buffer = ch.buffer;
-    src.detune.value = pitchSemitones * 100;
-    src.connect(gain);
-    gain.connect(analyser);
-    analyser.connect(masterGain);
-    ch.source = src;
-    src.start(0, currentPosition);
-    src.onended = () => {
-      ch.source = null;
-      if (isPlaying) checkAllEnded();
-    };
+    if (usePitchShift) {
+      const shifter = new PitchShifterClass(ctx, ch.buffer, 4096);
+      shifter.tempo = 1;
+      shifter.pitchSemitones = pitchSemitones;
+      shifter.percentagePlayed = currentPosition / ch.buffer.duration;
+      shifter.connect(gain);
+      gain.connect(analyser);
+      analyser.connect(masterGain);
+      ch.shifter = shifter;
+    } else {
+      const src = ctx.createBufferSource();
+      src.buffer = ch.buffer;
+      src.connect(gain);
+      gain.connect(analyser);
+      analyser.connect(masterGain);
+      ch.source = src;
+      src.start(0, currentPosition);
+      src.onended = () => {
+        ch.source = null;
+        if (isPlaying) checkAllEnded();
+      };
+    }
   });
 
   // Master analyser for VU
@@ -783,12 +845,7 @@ function pausePlayback() {
   if (!isPlaying) return;
   currentPosition = Math.min(ctx.currentTime - playStartTime, totalDuration);
   channels.forEach(ch => {
-    if (ch.source) {
-      ch.source.onended = null;
-      try { ch.source.stop(); } catch(e){}
-      try { ch.source.disconnect(); } catch(e){}
-      ch.source = null;
-    }
+    stopChannelNodes(ch);
     if (ch.vuRaf) { cancelAnimationFrame(ch.vuRaf); ch.vuRaf = null; }
     document.getElementById(`vu-${ch.id}`).style.height = '0%';
   });
@@ -805,12 +862,7 @@ function pausePlayback() {
 function stopAll() {
   if (isPlaying) {
     channels.forEach(ch => {
-      if (ch.source) {
-        ch.source.onended = null;
-        try { ch.source.stop(); } catch(e){}
-        try { ch.source.disconnect(); } catch(e){}
-        ch.source = null;
-      }
+      stopChannelNodes(ch);
       if (ch.vuRaf) { cancelAnimationFrame(ch.vuRaf); ch.vuRaf = null; }
       document.getElementById(`vu-${ch.id}`).style.height = '0%';
     });
@@ -865,31 +917,38 @@ function startTimer() {
     if (!isPlaying) return;
     currentPosition = Math.min(ctx.currentTime - playStartTime, totalDuration);
     if (!isSeeking) updateTimeDisplay();
+    if (totalDuration > 0 && currentPosition >= totalDuration) stopAll();
   }, 100);
 }
 function stopTimer() {
   clearInterval(timerInterval);
 }
 
-// ── MP3 離線渲染匯出 ──────────────────────────────────────
+// ── MP3 匯出（pitch=0 離線渲染 / pitch≠0 即時錄製） ────────
 async function exportMp3() {
   if (!lamejsReady) { setStatus('MP3 編碼器尚未就緒，請稍候再試', 'err'); return; }
   const loaded = channels.filter(ch => ch.buffer && !ch.muted);
   if (loaded.length === 0) { setStatus('沒有已載入（且未靜音）的音軌可匯出', 'err'); return; }
 
+  if (pitchSemitones === 0) {
+    await exportMp3Offline(loaded);
+  } else {
+    await exportMp3Realtime(loaded);
+  }
+}
+
+// 離線渲染（不變調，速度快）
+async function exportMp3Offline(loaded) {
   const btn = document.getElementById('btn-export');
   btn.disabled = true;
   btn.textContent = '⏳ 渲染中…';
   btn.classList.add('recording');
   setStatus('離線渲染中，請稍候…', 'warn');
 
-  // 計算最長時間（移調會改變播放速度，需相應調整渲染長度）
-  const pitchRatio = Math.pow(2, pitchSemitones / 12);
-  const maxDur = Math.max(...loaded.map(ch => ch.buffer.duration)) / pitchRatio;
+  const maxDur = Math.max(...loaded.map(ch => ch.buffer.duration));
   const sampleRate = loaded[0].buffer.sampleRate;
   const masterVol = parseInt(document.getElementById('master-fader').value) / 100;
 
-  // 建立 OfflineAudioContext
   const offCtx = new OfflineAudioContext(2, Math.ceil(maxDur * sampleRate), sampleRate);
   const offMaster = offCtx.createGain();
   offMaster.gain.value = masterVol;
@@ -898,7 +957,6 @@ async function exportMp3() {
   loaded.forEach(ch => {
     const src = offCtx.createBufferSource();
     src.buffer = ch.buffer;
-    src.detune.value = pitchSemitones * 100;
     const gain = offCtx.createGain();
     gain.gain.value = ch.volume / 100;
     src.connect(gain);
@@ -915,10 +973,100 @@ async function exportMp3() {
     return;
   }
 
-  // 轉為 MP3
+  await encodeAndDownload(rendered, btn, maxDur);
+}
+
+// 即時錄製（變調後速度等同播放，需即時錄製再轉檔）
+async function exportMp3Realtime(loaded) {
+  if (!PitchShifterClass) { setStatus('變調引擎尚未就緒，請稍候再試', 'err'); return; }
+
+  const wasPlaying = isPlaying;
+  if (wasPlaying) pausePlayback();
+
+  const btn = document.getElementById('btn-export');
+  btn.disabled = true;
+  btn.classList.add('recording');
+  setStatus('即時錄製中（變調匯出需即時錄製，請耐心等候）…', 'warn');
+
+  ensureCtx();
+  if (ctx.state === 'suspended') await ctx.resume();
+
+  const masterVol = parseInt(document.getElementById('master-fader').value) / 100;
+  const maxDur = Math.max(...loaded.map(ch => ch.buffer.duration));
+
+  const dest = ctx.createMediaStreamDestination();
+  const exportMaster = ctx.createGain();
+  exportMaster.gain.value = masterVol;
+  exportMaster.connect(dest);
+
+  const shifters = [];
+  const exportGains = [];
+  loaded.forEach(ch => {
+    const shifter = new PitchShifterClass(ctx, ch.buffer, 4096);
+    shifter.tempo = 1;
+    shifter.pitchSemitones = pitchSemitones;
+    shifter.percentagePlayed = 0;
+    const gain = ctx.createGain();
+    gain.gain.value = ch.volume / 100;
+    shifter.connect(gain);
+    gain.connect(exportMaster);
+    shifters.push(shifter);
+    exportGains.push(gain);
+  });
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+    ? 'audio/webm'
+    : (MediaRecorder.isTypeSupported('audio/ogg') ? 'audio/ogg' : '');
+  const recorder = new MediaRecorder(dest.stream, mimeType ? { mimeType } : undefined);
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+  const recordingDone = new Promise(resolve => { recorder.onstop = resolve; });
+
+  recorder.start();
+  const startTime = ctx.currentTime;
+
+  await new Promise(resolve => {
+    const progressTimer = setInterval(() => {
+      const elapsed = ctx.currentTime - startTime;
+      btn.textContent = `⏳ 錄製中 ${elapsed.toFixed(1)}/${maxDur.toFixed(1)}s`;
+      if (elapsed >= maxDur + 0.3) {
+        clearInterval(progressTimer);
+        resolve();
+      }
+    }, 100);
+  });
+
+  recorder.stop();
+  await recordingDone;
+
+  shifters.forEach(s => { try { s.off(); s.disconnect(); } catch(e){} });
+  exportGains.forEach(g => { try { g.disconnect(); } catch(e){} });
+  exportMaster.disconnect();
+
+  setStatus('解碼錄製內容中…', 'warn');
+  const recordedBlob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+  const arrBuf = await recordedBlob.arrayBuffer();
+
+  let rendered;
+  try {
+    rendered = await ctx.decodeAudioData(arrBuf);
+  } catch(e) {
+    setStatus('錄製內容解碼失敗: ' + e.message, 'err');
+    btn.disabled = false; btn.textContent = '⬇ 匯出 MP3'; btn.classList.remove('recording');
+    if (wasPlaying) togglePlay();
+    return;
+  }
+
+  await encodeAndDownload(rendered, btn, maxDur);
+  if (wasPlaying) togglePlay();
+}
+
+// 共用：將渲染結果編碼為 MP3 並下載
+async function encodeAndDownload(rendered, btn, durSeconds) {
   setStatus('編碼 MP3 中…', 'warn');
   await new Promise(r => setTimeout(r, 20)); // 讓 UI 更新
 
+  const sampleRate = rendered.sampleRate;
   const left  = rendered.getChannelData(0);
   const right = rendered.numberOfChannels > 1 ? rendered.getChannelData(1) : left;
   const mp3enc = new lamejs.Mp3Encoder(2, sampleRate, 128);
@@ -954,7 +1102,7 @@ async function exportMp3() {
   btn.disabled = false;
   btn.textContent = '⬇ 匯出 MP3';
   btn.classList.remove('recording');
-  setStatus(`MP3 匯出完成！(${(blob.size/1024).toFixed(0)} KB, ${maxDur.toFixed(1)}s)`, 'ok');
+  setStatus(`MP3 匯出完成！(${(blob.size/1024).toFixed(0)} KB, ${durSeconds.toFixed(1)}s)`, 'ok');
 }
 
 // ── 工具函式 ──────────────────────────────────────────────
