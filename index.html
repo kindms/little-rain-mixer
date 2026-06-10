@@ -31,8 +31,8 @@
   #main {
     display: flex;
     align-items: stretch;
-    height: calc(100vh - 40px);
-    min-height: 600px;
+    height: calc(100vh - 40px - 22px);
+    min-height: 560px;
   }
 
   /* ── 頻道條 ── */
@@ -46,15 +46,15 @@
     flex-direction: column;
     align-items: center;
     padding: 8px 6px;
-    gap: 6px;
+    gap: 4px;
     transition: background 0.2s;
   }
 
-  /* 音量重設按鈕 */
+  /* 音量重設按鈕：緊鄰推桿右上方 */
   .reset-vol-btn {
     position: absolute;
-    top: 4px;
-    right: 4px;
+    top: 14px;
+    right: 8px;
     width: 18px;
     height: 18px;
     line-height: 16px;
@@ -66,6 +66,7 @@
     font-size: 10px;
     cursor: pointer;
     text-align: center;
+    z-index: 2;
   }
   .reset-vol-btn:hover { background: #4af; color: #111; border-color: #4af; }
   .channel:hover { background: #252525; }
@@ -126,7 +127,7 @@
   /* VU meter */
   .vu-wrap {
     width: 16px;
-    height: 120px;
+    height: 100px;
     background: #111;
     border-radius: 2px;
     overflow: hidden;
@@ -146,6 +147,7 @@
 
   /* 推桿區 */
   .fader-area {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -170,7 +172,7 @@
     writing-mode: vertical-lr;
     direction: rtl;
     width: 30px;
-    height: 180px;
+    height: 150px;
     background: transparent;
     cursor: pointer;
     outline: none;
@@ -521,7 +523,6 @@ function buildUI() {
     div.setAttribute('draggable', false);
 
     div.innerHTML = `
-      <button class="reset-vol-btn" id="reset-${ch.id}" title="重設音量為 80%" onclick="resetVolume(${ch.id})">0</button>
       <input class="ch-name" id="name-${ch.id}" value="${ch.name}"
         oninput="channels[${ch.id}].name=this.value">
       <span class="ch-num">Ch ${ch.id + 1}</span>
@@ -533,6 +534,7 @@ function buildUI() {
       </label>
 
       <div class="fader-area">
+        <button class="reset-vol-btn" id="reset-${ch.id}" title="重設音量為 80%" onclick="resetVolume(${ch.id})">0</button>
         <div class="fader-label">Volume</div>
         <div class="fader-row">
           <div class="vu-wrap"><div class="vu-bar" id="vu-${ch.id}"></div></div>
