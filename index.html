@@ -157,7 +157,7 @@
   }
   input[type=range].vfader::-webkit-slider-runnable-track {
     width: 6px;
-    background: linear-gradient(to bottom, #4af 0%, #4af var(--pct, 75%), #333 var(--pct, 75%), #333 100%);
+    background: linear-gradient(to top, #4af 0%, #4af var(--pct, 75%), #333 var(--pct, 75%), #333 100%);
     border-radius: 3px;
   }
   input[type=range].vfader::-webkit-slider-thumb {
@@ -243,9 +243,43 @@
     padding: 6px;
     text-align: center;
     font-family: monospace;
-    font-size: 18px;
+    font-size: 14px;
     color: #4d4;
-    letter-spacing: 2px;
+    letter-spacing: 1px;
+  }
+
+  /* 統一播放進度條 */
+  input[type=range].progress-bar {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: linear-gradient(to right, #4af 0%, #4af var(--ppct, 0%), #333 var(--ppct, 0%), #333 100%);
+    outline: none;
+    cursor: pointer;
+  }
+  input[type=range].progress-bar::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: linear-gradient(to bottom, #ddd, #aaa);
+    border: 1px solid #555;
+    cursor: grab;
+    margin-top: -4px;
+  }
+  input[type=range].progress-bar::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: linear-gradient(to bottom, #ddd, #aaa);
+    border: 1px solid #555;
+    cursor: grab;
+  }
+  input[type=range].progress-bar::-moz-range-progress {
+    background: #4af;
+    height: 6px;
+    border-radius: 3px;
   }
 
   .info-box {
@@ -262,7 +296,7 @@
   /* 主推桿區特殊樣式 */
   .master .ch-name { background: #1a2a3a; color: #4af; border-color: #4af; font-size: 13px; }
   input[type=range].vfader.master-fader::-webkit-slider-runnable-track {
-    background: linear-gradient(to bottom, #4af 0%, #4af var(--pct, 75%), #333 var(--pct, 75%), #333 100%);
+    background: linear-gradient(to top, #4af 0%, #4af var(--pct, 75%), #333 var(--pct, 75%), #333 100%);
   }
 
   /* 拖拉上傳高亮 */
@@ -316,7 +350,10 @@
   <!-- 右側控制 -->
   <div id="panel">
     <h3>Transport</h3>
-    <div class="time-display" id="time-display">00:00.0</div>
+    <div class="time-display" id="time-display">00:00.0 / 00:00.0</div>
+    <input type="range" id="progress-bar" class="progress-bar"
+      min="0" max="0" step="0.01" value="0"
+      oninput="onSeekInput(this.value)" onchange="onSeekChange(this.value)">
     <button class="ctrl-btn play" id="btn-play" onclick="togglePlay()">▶ Play All</button>
     <button class="ctrl-btn stop" id="btn-stop" onclick="stopAll()">■ Stop</button>
 
@@ -367,6 +404,9 @@ let masterGain = null;
 let isPlaying = false;
 let playStartTime = 0;
 let timerInterval = null;
+let currentPosition = 0;   // 目前播放位置（秒）
+let totalDuration = 0;     // 最長音軌長度（秒）
+let isSeeking = false;     // 使用者是否正在拖拉進度條
 
 function ensureCtx() {
   if (!ctx) {
@@ -501,9 +541,58 @@ async function loadFileObj(id, file) {
     fnEl.textContent = file.name;
 
     updateLoadedCount();
+    updateTotalDuration();
     setStatus(`Ch${id+1} 載入成功: ${file.name} (${(audioBuf.duration).toFixed(1)}s)`, 'ok');
   } catch(e) {
     setStatus(`Ch${id+1} 解碼失敗: ${e.message}`, 'err');
+  }
+}
+
+// ── 總長度 / 進度條 ──────────────────────────────────────
+function updateTotalDuration() {
+  const durations = channels.filter(ch => ch.buffer).map(ch => ch.buffer.duration);
+  totalDuration = durations.length ? Math.max(...durations) : 0;
+  const bar = document.getElementById('progress-bar');
+  bar.max = totalDuration;
+  if (currentPosition > totalDuration) currentPosition = totalDuration;
+  updateTimeDisplay();
+}
+
+function formatTime(sec) {
+  sec = Math.max(0, sec);
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  const ms = Math.floor((sec % 1) * 10);
+  return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0') + '.' + ms;
+}
+
+function updateTimeDisplay() {
+  document.getElementById('time-display').textContent =
+    `${formatTime(currentPosition)} / ${formatTime(totalDuration)}`;
+  const pct = totalDuration > 0 ? (currentPosition / totalDuration * 100) : 0;
+  const bar = document.getElementById('progress-bar');
+  bar.style.setProperty('--ppct', pct + '%');
+  if (!isSeeking) bar.value = currentPosition;
+}
+
+// 拖拉中：只更新顯示，不真的 seek
+function onSeekInput(val) {
+  isSeeking = true;
+  currentPosition = parseFloat(val);
+  updateTimeDisplay();
+}
+
+// 放開滑桿：實際 seek
+function onSeekChange(val) {
+  isSeeking = false;
+  seekTo(parseFloat(val));
+}
+
+function seekTo(sec) {
+  currentPosition = Math.min(Math.max(0, sec), totalDuration);
+  updateTimeDisplay();
+  if (isPlaying) {
+    startPlayback(); // 重新從新位置開始所有音軌
   }
 }
 
@@ -543,19 +632,30 @@ function unmuteAll() { channels.forEach(ch => { if (ch.muted) toggleMute(ch.id);
 
 // ── 播放 ──────────────────────────────────────────────────
 async function togglePlay() {
-  if (isPlaying) { stopAll(); return; }
+  if (isPlaying) { pausePlayback(); return; }
 
   ensureCtx();
   if (ctx.state === 'suspended') await ctx.resume();
+  startPlayback();
+}
 
+function startPlayback() {
   const loaded = channels.filter(ch => ch.buffer);
   if (loaded.length === 0) { setStatus('請先匯入至少一個音頻檔案！', 'err'); return; }
 
-  // 清理舊 source
-  channels.forEach(ch => { if (ch.source) { try { ch.source.disconnect(); } catch(e){} } });
+  // 清理舊 source（重新播放 / seek 時用）
+  channels.forEach(ch => {
+    if (ch.source) {
+      ch.source.onended = null;
+      try { ch.source.stop(); } catch(e){}
+      try { ch.source.disconnect(); } catch(e){}
+      ch.source = null;
+    }
+  });
 
   channels.forEach(ch => {
     if (!ch.buffer) return;
+    if (currentPosition >= ch.buffer.duration) return; // 此軌已播完，不再啟動
 
     const gain = ctx.createGain();
     gain.gain.value = ch.muted ? 0 : (ch.volume / 100);
@@ -571,8 +671,9 @@ async function togglePlay() {
     gain.connect(analyser);
     analyser.connect(masterGain);
     ch.source = src;
-    src.start(0);
+    src.start(0, currentPosition);
     src.onended = () => {
+      ch.source = null;
       if (isPlaying) checkAllEnded();
     };
   });
@@ -585,7 +686,7 @@ async function togglePlay() {
   masterAnalyser.connect(ctx.destination);
 
   isPlaying = true;
-  playStartTime = ctx.currentTime;
+  playStartTime = ctx.currentTime - currentPosition;
   document.getElementById('btn-play').textContent = '⏸ Pause';
   document.getElementById('btn-play').classList.add('active');
   setStatus(`播放中… ${loaded.length} 軌`, 'ok');
@@ -593,10 +694,17 @@ async function togglePlay() {
   startVU(masterAnalyser);
 }
 
-function stopAll() {
+// 暫停：保留目前播放位置
+function pausePlayback() {
   if (!isPlaying) return;
+  currentPosition = Math.min(ctx.currentTime - playStartTime, totalDuration);
   channels.forEach(ch => {
-    if (ch.source) { try { ch.source.stop(); } catch(e){} ch.source = null; }
+    if (ch.source) {
+      ch.source.onended = null;
+      try { ch.source.stop(); } catch(e){}
+      try { ch.source.disconnect(); } catch(e){}
+      ch.source = null;
+    }
     if (ch.vuRaf) { cancelAnimationFrame(ch.vuRaf); ch.vuRaf = null; }
     document.getElementById(`vu-${ch.id}`).style.height = '0%';
   });
@@ -604,8 +712,32 @@ function stopAll() {
   stopTimer();
   document.getElementById('btn-play').textContent = '▶ Play All';
   document.getElementById('btn-play').classList.remove('active');
-  document.getElementById(`vu-master`).style.height = '0%';
+  document.getElementById('vu-master').style.height = '0%';
+  updateTimeDisplay();
+  setStatus('已暫停', 'ok');
+}
 
+// 停止：回到開頭
+function stopAll() {
+  if (isPlaying) {
+    channels.forEach(ch => {
+      if (ch.source) {
+        ch.source.onended = null;
+        try { ch.source.stop(); } catch(e){}
+        try { ch.source.disconnect(); } catch(e){}
+        ch.source = null;
+      }
+      if (ch.vuRaf) { cancelAnimationFrame(ch.vuRaf); ch.vuRaf = null; }
+      document.getElementById(`vu-${ch.id}`).style.height = '0%';
+    });
+    isPlaying = false;
+    stopTimer();
+    document.getElementById('btn-play').textContent = '▶ Play All';
+    document.getElementById('btn-play').classList.remove('active');
+    document.getElementById('vu-master').style.height = '0%';
+  }
+  currentPosition = 0;
+  updateTimeDisplay();
   setStatus('已停止', 'ok');
 }
 
@@ -647,17 +779,12 @@ function startTimer() {
   clearInterval(timerInterval);
   timerInterval = setInterval(() => {
     if (!isPlaying) return;
-    const elapsed = ctx.currentTime - playStartTime;
-    const m = Math.floor(elapsed / 60);
-    const s = Math.floor(elapsed % 60);
-    const ms = Math.floor((elapsed % 1) * 10);
-    document.getElementById('time-display').textContent =
-      String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0') + '.' + ms;
+    currentPosition = Math.min(ctx.currentTime - playStartTime, totalDuration);
+    if (!isSeeking) updateTimeDisplay();
   }, 100);
 }
 function stopTimer() {
   clearInterval(timerInterval);
-  document.getElementById('time-display').textContent = '00:00.0';
 }
 
 // ── MP3 離線渲染匯出 ──────────────────────────────────────

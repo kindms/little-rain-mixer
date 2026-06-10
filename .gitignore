@@ -1,0 +1,7 @@
+build/
+dist/
+*.spec
+demucs_gui.py
+run_demucs.py
+音樂分軌工具/
+testassets/
