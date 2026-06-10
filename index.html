@@ -37,6 +37,7 @@
 
   /* ── 頻道條 ── */
   .channel {
+    position: relative;
     width: 110px;
     min-width: 100px;
     background: #222;
@@ -48,6 +49,25 @@
     gap: 6px;
     transition: background 0.2s;
   }
+
+  /* 音量重設按鈕 */
+  .reset-vol-btn {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 18px;
+    height: 18px;
+    line-height: 16px;
+    padding: 0;
+    background: #333;
+    color: #888;
+    border: 1px solid #555;
+    border-radius: 3px;
+    font-size: 10px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .reset-vol-btn:hover { background: #4af; color: #111; border-color: #4af; }
   .channel:hover { background: #252525; }
   .channel.master {
     width: 130px;
@@ -215,6 +235,43 @@
   }
   #panel h3 { color: #aaf; font-size: 13px; border-bottom: 1px solid #336; padding-bottom: 4px; }
 
+  .transport-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #336;
+    padding-bottom: 4px;
+  }
+  .transport-header h3 { border-bottom: none; padding-bottom: 0; }
+  .pitch-ctrl {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .pitch-btn {
+    width: 20px;
+    height: 20px;
+    line-height: 18px;
+    padding: 0;
+    background: #2a3a4a;
+    color: #8af;
+    border: 1px solid #46a;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    text-align: center;
+  }
+  .pitch-btn:hover { background: #3a5a7a; }
+  .pitch-val {
+    min-width: 22px;
+    text-align: center;
+    font-family: monospace;
+    font-size: 12px;
+    color: #4af;
+    font-weight: bold;
+  }
+
   .ctrl-btn {
     width: 100%;
     padding: 8px;
@@ -349,7 +406,14 @@
 
   <!-- 右側控制 -->
   <div id="panel">
-    <h3>Transport</h3>
+    <div class="transport-header">
+      <h3>Transport</h3>
+      <div class="pitch-ctrl">
+        <button class="pitch-btn" onclick="changePitch(-1)">－</button>
+        <span class="pitch-val" id="pitch-val">0</span>
+        <button class="pitch-btn" onclick="changePitch(1)">＋</button>
+      </div>
+    </div>
     <div class="time-display" id="time-display">00:00.0 / 00:00.0</div>
     <input type="range" id="progress-bar" class="progress-bar"
       min="0" max="0" step="0.01" value="0"
@@ -407,6 +471,17 @@ let timerInterval = null;
 let currentPosition = 0;   // 目前播放位置（秒）
 let totalDuration = 0;     // 最長音軌長度（秒）
 let isSeeking = false;     // 使用者是否正在拖拉進度條
+let pitchSemitones = 0;    // 移調量（半音，-12 ~ +12）
+
+function changePitch(delta) {
+  pitchSemitones = Math.min(12, Math.max(-12, pitchSemitones + delta));
+  const val = pitchSemitones > 0 ? `+${pitchSemitones}` : `${pitchSemitones}`;
+  document.getElementById('pitch-val').textContent = val;
+  // 即時套用到正在播放的音軌
+  channels.forEach(ch => {
+    if (ch.source) ch.source.detune.setTargetAtTime(pitchSemitones * 100, ctx.currentTime, 0.01);
+  });
+}
 
 function ensureCtx() {
   if (!ctx) {
@@ -446,6 +521,7 @@ function buildUI() {
     div.setAttribute('draggable', false);
 
     div.innerHTML = `
+      <button class="reset-vol-btn" id="reset-${ch.id}" title="重設音量為 80%" onclick="resetVolume(${ch.id})">0</button>
       <input class="ch-name" id="name-${ch.id}" value="${ch.name}"
         oninput="channels[${ch.id}].name=this.value">
       <span class="ch-num">Ch ${ch.id + 1}</span>
@@ -607,6 +683,11 @@ function setVol(id, val) {
   }
 }
 
+function resetVolume(id) {
+  document.getElementById(`fader-${id}`).value = 80;
+  setVol(id, 80);
+}
+
 function setMasterVol(val) {
   document.getElementById('master-val').textContent = val + '%';
   updateMasterFaderStyle(val);
@@ -667,6 +748,7 @@ function startPlayback() {
 
     const src = ctx.createBufferSource();
     src.buffer = ch.buffer;
+    src.detune.value = pitchSemitones * 100;
     src.connect(gain);
     gain.connect(analyser);
     analyser.connect(masterGain);
@@ -799,8 +881,9 @@ async function exportMp3() {
   btn.classList.add('recording');
   setStatus('離線渲染中，請稍候…', 'warn');
 
-  // 計算最長時間
-  const maxDur = Math.max(...loaded.map(ch => ch.buffer.duration));
+  // 計算最長時間（移調會改變播放速度，需相應調整渲染長度）
+  const pitchRatio = Math.pow(2, pitchSemitones / 12);
+  const maxDur = Math.max(...loaded.map(ch => ch.buffer.duration)) / pitchRatio;
   const sampleRate = loaded[0].buffer.sampleRate;
   const masterVol = parseInt(document.getElementById('master-fader').value) / 100;
 
@@ -813,6 +896,7 @@ async function exportMp3() {
   loaded.forEach(ch => {
     const src = offCtx.createBufferSource();
     src.buffer = ch.buffer;
+    src.detune.value = pitchSemitones * 100;
     const gain = offCtx.createGain();
     gain.gain.value = ch.volume / 100;
     src.connect(gain);
